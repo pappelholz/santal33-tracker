@@ -139,4 +139,4 @@ def send_email_report(ranked: list[dict]) -> None:
     else:
         best = ranked[0]
         is_deal = best["final_total_eur"] <= DEAL_THRESHOLD_EUR
-        prefix = "【好价提醒】" if is_deal else "【
+        prefix = "好价- " if is_deal else "日报- "
