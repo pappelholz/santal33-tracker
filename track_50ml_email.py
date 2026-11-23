@@ -45,6 +45,33 @@ def fetch_50ml_data():
             )
     return "\n".join(snippets)
 
+def pick_available_gemini_model():
+    preferred_prefixes = (
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+    )
+    available = []
+    for m in client.models.list():
+        actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
+        if not actions or "generateContent" in actions or "generate_content" in actions:
+            name = m.name.replace("models/", "")
+            available.append(name)
+
+    for prefix in preferred_prefixes:
+        for name in available:
+            if name.startswith(prefix):
+                return name
+
+    for name in available:
+        if "flash" in name:
+            return name
+
+    if available:
+        return available[0]
+
+    raise RuntimeError("当前 API Key 下未找到支持 generateContent 的可用 Gemini 模型")
+
 
 def extract_50ml_offers(raw_text):
     system_prompt = """
