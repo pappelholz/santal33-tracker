@@ -95,6 +95,7 @@ def extract_50ml_offers(raw_text):
       ]
     }
     """
+    model_name = pick_available_gemini_model()
     res = client.models.generate_content(
         model="gemini-3.0-flash",
         contents=raw_text,
