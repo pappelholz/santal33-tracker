@@ -69,7 +69,7 @@ def extract_50ml_offers(raw_text):
     }
     """
     res = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.0-flash",
         contents=raw_text,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
