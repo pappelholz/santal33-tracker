@@ -140,3 +140,55 @@ def send_email_report(ranked: list[dict]) -> None:
         best = ranked[0]
         is_deal = best["final_total_eur"] <= DEAL_THRESHOLD_EUR
         prefix = "好价- " if is_deal else "日报- "
+        msg["Subject"] = (
+            f"{prefix}Le Labo Santal 33 (50ml) 最低到手 {best['final_total_eur']} € - {best['retailer']}"
+        )
+
+        plain_text = (
+            f"Le Labo Santal 33 Eau de Parfum (50ml) 每日最低到手报价\n"
+            f"========================================\n"
+            f"最低到手总价（含运费）：{best['final_total_eur']} €\n"
+            f"购买渠道：{best['retailer']}\n"
+            f"价格明细：原价 {best['original_price_eur']} € -> 折后 {best['discounted_price_eur']} € + 运费 {best['actual_shipping_eur']} €\n"
+            f"优惠信息：{best['promo_code']}（{best['conditions']}）\n"
+            f"商品链接：{best['url']}\n"
+        )
+
+        html_content = f"""
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #222; max-width: 600px;">
+          <h2 style="margin-bottom: 12px;">{"🔥 50ml 出现好价！" if is_deal else "🧴 Le Labo Santal 33 (50ml) 每日比价"}</h2>
+          <p style="font-size: 18px; background: #f8f9fa; padding: 12px; border-radius: 6px;">
+            <strong>今日最低到手总价（含运费）：<span style="color: #b91c1c;">{best['final_total_eur']} €</span></strong>
+          </p>
+          <ul>
+            <li><strong>购买渠道：</strong>{best['retailer']}</li>
+            <li><strong>价格拆解：</strong>原价 {best['original_price_eur']} € &rarr; 折后 {best['discounted_price_eur']} € + 运费 {best['actual_shipping_eur']} €</li>
+            <li><strong>折扣说明：</strong>{best['promo_code']}（{best['conditions']}）</li>
+            <li><strong>商品直达：</strong><a href="{best['url']}" style="color: #2563eb;">点击前往购买页面</a></li>
+          </ul>
+          <p style="font-size: 12px; color: #666; border-top: 1px solid #eee; padding-top: 8px;">
+            参考基准：德国 50ml 日常专柜正价约 212 €；当低于 {DEAL_THRESHOLD_EUR} € 时自动触发好价提醒。
+          </p>
+        </div>
+        """
+
+        msg.set_content(plain_text)
+        msg.add_alternative(html_content, subtype="html")
+
+    print(f"准备连接 SMTP: {SMTP_HOST}:{SMTP_PORT}, 发件人: {SMTP_USER}, 收件人: {EMAIL_TO}")
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+        server.set_debuglevel(1)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        refused = server.send_message(msg)
+        print("发送完成，被拒收列表:", refused)
+
+
+# ================= 6. 主程序入口 =================
+if __name__ == "__main__":
+    raw_data = fetch_market_data()
+    offers = extract_50ml_offers(raw_data)
+    ranked_offers = calculate_and_rank(offers)
+    send_email_report(ranked_offers)
