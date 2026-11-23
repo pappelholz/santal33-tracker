@@ -1,6 +1,7 @@
 import json
 import os
 import smtplib
+import time
 from email.message import EmailMessage
 
 import requests
@@ -19,7 +20,7 @@ EMAIL_TO = os.environ["EMAIL_TO"]
 
 # 价格提醒阈值：德国 50ml 专柜日常正价约 212 €，低于 190 € 触发“好价提醒”
 DEAL_THRESHOLD_EUR = 190.0
-GEMINI_MODEL = "gemini-3.8-flash"
+CANDIDATE_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
 
 client = genai.Client(api_key=LLM_API_KEY)
 
@@ -52,7 +53,7 @@ def fetch_market_data() -> str:
     return "\n".join(snippets)
 
 
-# ================= 3. AI 提取结构化价格与规则 =================
+# ================= 3. AI 提取结构化价格与规则（含自动容错切换） =================
 def extract_50ml_offers(raw_text: str) -> list[dict]:
     system_prompt = """
     你是欧洲美妆电商比价提取器。仅提取 Le Labo Santal 33 Eau de Parfum (EDP) 【50 ml 装】的欧元(€)在售报价。
@@ -75,16 +76,27 @@ def extract_50ml_offers(raw_text: str) -> list[dict]:
       ]
     }
     """
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=raw_text,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            temperature=0.1,
-        ),
-    )
-    return json.loads(response.text).get("offers", [])
+    last_err = None
+    for model_name in CANDIDATE_MODELS:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=raw_text,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                    ),
+                )
+                print(f"成功使用模型 {model_name} 完成数据提取")
+                return json.loads(response.text).get("offers", [])
+            except Exception as err:
+                last_err = err
+                print(f"模型 {model_name} 第 {attempt + 1} 次调用失败: {err}")
+                time.sleep(3)
+
+    raise RuntimeError(f"所有备用模型均暂时不可用: {last_err}")
 
 
 # ================= 4. 精确计算到手总价（含运费） =================
@@ -92,7 +104,6 @@ def calculate_and_rank(offers: list[dict]) -> list[dict]:
     ranked = []
     for item in offers:
         price = float(item.get("original_price_eur") or 0)
-        # 过滤异常非 50ml 价格区间
         if not (130.0 <= price <= 250.0):
             continue
 
@@ -108,7 +119,6 @@ def calculate_and_rank(offers: list[dict]) -> list[dict]:
 
         discounted_price = round(price - discount_amount, 2)
 
-        # 折后价二次核验免邮门槛
         free_threshold = float(item.get("free_shipping_threshold_eur") or 0)
         std_shipping = float(item.get("standard_shipping_eur") or 0)
         actual_shipping = 0.0 if discounted_price >= free_threshold else std_shipping
