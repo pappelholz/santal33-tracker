@@ -17,7 +17,7 @@ SMTP_USER = os.environ["SMTP_USER"]
 SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]
 EMAIL_TO = os.environ["EMAIL_TO"]
 
-# 初始化 Google 官方 Gemini 客户端（原生支持 AQ. 格式密钥）
+# 初始化 Google 官方 Gemini 客户端
 client = genai.Client(api_key=LLM_API_KEY)
 
 
@@ -45,12 +45,8 @@ def fetch_50ml_data():
             )
     return "\n".join(snippets)
 
+
 def pick_available_gemini_model():
-    preferred_prefixes = (
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-    )
     available = []
     for m in client.models.list():
         actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
@@ -58,10 +54,12 @@ def pick_available_gemini_model():
             name = m.name.replace("models/", "")
             available.append(name)
 
-    for prefix in preferred_prefixes:
-        for name in available:
-            if name.startswith(prefix):
-                return name
+    print("当前 Key 可用模型列表:", available)
+
+    # 优先挑选带 flash 且非 lite/thinking/image/audio 的通用文本模型
+    for name in available:
+        if "flash" in name and not any(x in name for x in ("image", "audio", "tts", "embedding", "lite")):
+            return name
 
     for name in available:
         if "flash" in name:
@@ -96,8 +94,10 @@ def extract_50ml_offers(raw_text):
     }
     """
     model_name = pick_available_gemini_model()
+    print("本次选用的模型:", model_name)
+
     res = client.models.generate_content(
-        model="gemini-3.0-flash",
+        model=model_name,
         contents=raw_text,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
