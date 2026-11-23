@@ -3,24 +3,24 @@ import json
 import smtplib
 from email.message import EmailMessage
 import requests
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
 # 1. AI 与检索配置
 LLM_API_KEY = os.environ["LLM_API_KEY"]
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
 SEARCH_API_KEY = os.environ["SEARCH_API_KEY"]
 
 # 2. SMTP 邮件配置
-SMTP_HOST = os.environ["SMTP_HOST"]          # 例如: smtp.gmail.com / mail.gmx.net / smtp.web.de
+SMTP_HOST = os.environ["SMTP_HOST"]
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ["SMTP_USER"]          # 发件邮箱账号
-SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]  # 邮箱应用专用密码（App Password）
-EMAIL_TO = os.environ["EMAIL_TO"]            # 收件邮箱（可填自己的邮箱）
+SMTP_USER = os.environ["SMTP_USER"]
+SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]
+EMAIL_TO = os.environ["EMAIL_TO"]
 
-client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+# 初始化 Google 官方 Gemini 客户端（原生支持 AQ. 格式密钥）
+client = genai.Client(api_key=LLM_API_KEY)
 
 
-# 3. 检索 50ml 报价与当天折扣
 def fetch_50ml_data():
     queries = [
         '"Le Labo" "Santal 33" "50 ml" OR "50ml" Eau de Parfum Preis kaufen idealo breuninger 24s',
@@ -46,7 +46,6 @@ def fetch_50ml_data():
     return "\n".join(snippets)
 
 
-# 4. 让 AI 提取 50ml 报价与折扣、免邮门槛参数
 def extract_50ml_offers(raw_text):
     system_prompt = """
     你是欧洲美妆电商比价提取器。仅提取 Le Labo Santal 33 Eau de Parfum (EDP) 【50 ml 装】的欧元(€)在售报价。
@@ -69,19 +68,18 @@ def extract_50ml_offers(raw_text):
       ]
     }
     """
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": raw_text}
-        ],
-        temperature=0.1
+    res = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=raw_text,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            temperature=0.1
+        )
     )
-    return json.loads(res.choices[0].message.content).get("offers", [])
+    return json.loads(res.text).get("offers", [])
 
 
-# 5. 精确计算 50ml 折后价、折后免邮校验及最终到手总价
 def calculate_50ml_final_price(offers):
     ranked = []
     for item in offers:
@@ -116,7 +114,6 @@ def calculate_50ml_final_price(offers):
     return sorted(ranked, key=lambda x: x["final_total_eur"])
 
 
-# 6. 通过 SMTP 发送邮件报告
 def send_email_report(ranked):
     msg = EmailMessage()
     msg["From"] = SMTP_USER
