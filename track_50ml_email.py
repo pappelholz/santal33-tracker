@@ -1,77 +1,59 @@
-import os
 import json
+import os
 import smtplib
 from email.message import EmailMessage
+
 import requests
 from google import genai
 from google.genai import types
 
-# 1. AI 与检索配置
+# ================= 1. 环境变量配置 =================
 LLM_API_KEY = os.environ["LLM_API_KEY"]
 SEARCH_API_KEY = os.environ["SEARCH_API_KEY"]
 
-# 2. SMTP 邮件配置
 SMTP_HOST = os.environ["SMTP_HOST"]
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ["SMTP_USER"]
 SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]
 EMAIL_TO = os.environ["EMAIL_TO"]
 
-# 初始化 Google 官方 Gemini 客户端
+# 价格提醒阈值：德国 50ml 专柜日常正价约 212 €，低于 190 € 触发“好价提醒”
+DEAL_THRESHOLD_EUR = 190.0
+GEMINI_MODEL = "gemini-3.8-flash"
+
 client = genai.Client(api_key=LLM_API_KEY)
 
 
-def fetch_50ml_data():
+# ================= 2. 检索实时报价与折扣 =================
+def fetch_market_data() -> str:
     queries = [
         '"Le Labo" "Santal 33" "50 ml" OR "50ml" Eau de Parfum Preis kaufen idealo breuninger 24s',
-        'breuninger 24s printemps gutschein rabattcode beauty le labo aktuell'
+        "breuninger 24s printemps gutschein rabattcode beauty le labo aktuell",
     ]
     snippets = []
-    for q in queries:
+    for query in queries:
         resp = requests.post(
             "https://api.tavily.com/search",
             json={
                 "api_key": SEARCH_API_KEY,
-                "query": q,
+                "query": query,
                 "search_depth": "advanced",
-                "max_results": 8
+                "max_results": 8,
             },
-            timeout=30
+            timeout=30,
         )
         resp.raise_for_status()
-        for r in resp.json().get("results", []):
+        for item in resp.json().get("results", []):
             snippets.append(
-                f"标题: {r.get('title')}\n链接: {r.get('url')}\n内容: {r.get('content')}\n---"
+                f"标题: {item.get('title')}\n"
+                f"链接: {item.get('url')}\n"
+                f"内容: {item.get('content')}\n---"
             )
     return "\n".join(snippets)
 
 
-def pick_available_gemini_model():
-    available = []
-    for m in client.models.list():
-        actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
-        if not actions or "generateContent" in actions or "generate_content" in actions:
-            name = m.name.replace("models/", "")
-            available.append(name)
-
-    print("当前 Key 可用模型列表:", available)
-
-    # 优先挑选带 flash 且非 lite/thinking/image/audio 的通用文本模型
-    for name in available:
-        if "flash" in name and not any(x in name for x in ("image", "audio", "tts", "embedding", "lite")):
-            return name
-
-    for name in available:
-        if "flash" in name:
-            return name
-
-    if available:
-        return available[0]
-
-    raise RuntimeError("当前 API Key 下未找到支持 generateContent 的可用 Gemini 模型")
-
-
-def extract_50ml_offers(raw_text):
+# ================= 3. AI 提取结构化价格与规则 =================
+def extract_50ml_offers(raw_text: str) -> list[dict]:
     system_prompt = """
     你是欧洲美妆电商比价提取器。仅提取 Le Labo Santal 33 Eau de Parfum (EDP) 【50 ml 装】的欧元(€)在售报价。
     坚决剔除 15ml/30ml/100ml、身体护理、CHF标价及缺货商品。
@@ -93,32 +75,32 @@ def extract_50ml_offers(raw_text):
       ]
     }
     """
-    model_name = pick_available_gemini_model()
-    print("本次选用的模型:", model_name)
-
-    res = client.models.generate_content(
-        model=model_name,
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
         contents=raw_text,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             response_mime_type="application/json",
-            temperature=0.1
-        )
+            temperature=0.1,
+        ),
     )
-    return json.loads(res.text).get("offers", [])
+    return json.loads(response.text).get("offers", [])
 
 
-def calculate_50ml_final_price(offers):
+# ================= 4. 精确计算到手总价（含运费） =================
+def calculate_and_rank(offers: list[dict]) -> list[dict]:
     ranked = []
     for item in offers:
-        price = float(item.get("original_price_eur", 0))
-        if price < 130 or price > 250:
+        price = float(item.get("original_price_eur") or 0)
+        # 过滤异常非 50ml 价格区间
+        if not (130.0 <= price <= 250.0):
             continue
 
         discount_amount = 0.0
-        if price >= float(item.get("min_spend_eur", 0)):
+        min_spend = float(item.get("min_spend_eur") or 0)
+        if price >= min_spend:
             d_type = item.get("discount_type")
-            d_val = float(item.get("discount_value", 0))
+            d_val = float(item.get("discount_value") or 0)
             if d_type == "percent":
                 discount_amount = price * (d_val / 100.0)
             elif d_type == "fixed":
@@ -126,23 +108,27 @@ def calculate_50ml_final_price(offers):
 
         discounted_price = round(price - discount_amount, 2)
 
-        free_threshold = float(item.get("free_shipping_threshold_eur", 0))
-        std_shipping = float(item.get("standard_shipping_eur", 0))
+        # 折后价二次核验免邮门槛
+        free_threshold = float(item.get("free_shipping_threshold_eur") or 0)
+        std_shipping = float(item.get("standard_shipping_eur") or 0)
         actual_shipping = 0.0 if discounted_price >= free_threshold else std_shipping
 
         final_total = round(discounted_price + actual_shipping, 2)
 
-        ranked.append({
-            **item,
-            "discounted_price_eur": discounted_price,
-            "actual_shipping_eur": actual_shipping,
-            "final_total_eur": final_total
-        })
+        ranked.append(
+            {
+                **item,
+                "discounted_price_eur": discounted_price,
+                "actual_shipping_eur": actual_shipping,
+                "final_total_eur": final_total,
+            }
+        )
 
     return sorted(ranked, key=lambda x: x["final_total_eur"])
 
 
-def send_email_report(ranked):
+# ================= 5. 发送比价邮件报告 =================
+def send_email_report(ranked: list[dict]) -> None:
     msg = EmailMessage()
     msg["From"] = SMTP_USER
     msg["To"] = EMAIL_TO
@@ -152,47 +138,5 @@ def send_email_report(ranked):
         msg.set_content("今日未抓取到有效的 Le Labo Santal 33 (50ml) 报价，请检查搜索词或数据源。")
     else:
         best = ranked[0]
-        is_deal = best["final_total_eur"] <= 190.0
-        prefix = "【好价提醒】" if is_deal else "【每日比价】"
-        msg["Subject"] = f"{prefix} Le Labo Santal 33 (50ml) 最低到手 {best['final_total_eur']} € - {best['retailer']}"
-
-        plain_text = (
-            f"Le Labo Santal 33 Eau de Parfum (50ml) 每日最低到手报价\n"
-            f"========================================\n"
-            f"最低到手总价（含运费）：{best['final_total_eur']} €\n"
-            f"购买渠道：{best['retailer']}\n"
-            f"价格明细：原价 {best['original_price_eur']} € -> 折后 {best['discounted_price_eur']} € + 运费 {best['actual_shipping_eur']} €\n"
-            f"优惠信息：{best['promo_code']}（{best['conditions']}）\n"
-            f"商品链接：{best['url']}\n"
-        )
-
-        html_content = f"""
-        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #222;">
-          <h2>{"🔥 50ml 出现好价！" if is_deal else "🧴 Le Labo Santal 33 (50ml) 每日比价"}</h2>
-          <p style="font-size: 18px;">
-            <strong>今日最低到手总价（含运费）：<span style="color: #b91c1c;">{best['final_total_eur']} €</span></strong>
-          </p>
-          <ul>
-            <li><strong>购买渠道：</strong>{best['retailer']}</li>
-            <li><strong>价格拆解：</strong>原价 {best['original_price_eur']} € &rarr; 折后 {best['discounted_price_eur']} € + 运费 {best['actual_shipping_eur']} €</li>
-            <li><strong>折扣说明：</strong>{best['promo_code']}（{best['conditions']}）</li>
-            <li><strong>商品直达：</strong><a href="{best['url']}">打开购买页面</a></li>
-          </ul>
-          <p style="font-size: 12px; color: #666;">参考基准：德国 50ml 日常专柜正价约 212 €；建议重点关注 190 € 及以下到手价。</p>
-        </div>
-        """
-
-        msg.set_content(plain_text)
-        msg.add_alternative(html_content, subtype="html")
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.send_message(msg)
-
-
-if __name__ == "__main__":
-    raw = fetch_50ml_data()
-    offers = extract_50ml_offers(raw)
-    ranked = calculate_50ml_final_price(offers)
-    send_email_report(ranked)
+        is_deal = best["final_total_eur"] <= DEAL_THRESHOLD_EUR
+        prefix = "【好价提醒】" if is_deal else "【
