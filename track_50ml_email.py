@@ -19,7 +19,7 @@ SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]
 EMAIL_TO = os.environ["EMAIL_TO"]
 
 DEAL_THRESHOLD_EUR = 190.0
-CANDIDATE_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash"]
+CANDIDATE_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 
 client = genai.Client(api_key=LLM_API_KEY)
 
@@ -38,7 +38,7 @@ def fetch_market_data() -> str:
                 "api_key": SEARCH_API_KEY,
                 "query": query,
                 "search_depth": "advanced",
-                "max_results": 8,
+                "max_results": 6,
             },
             timeout=30,
         )
@@ -87,7 +87,7 @@ def extract_50ml_offers(raw_text: str) -> list[dict]:
                         system_instruction=system_prompt,
                         response_mime_type="application/json",
                         temperature=0.1,
-                        http_options=types.HttpOptions(timeout=15000),
+                        http_options=types.HttpOptions(timeout=35000),
                     ),
                 )
                 print(f"Extraktion erfolgreich mit Modell: {model_name}")
